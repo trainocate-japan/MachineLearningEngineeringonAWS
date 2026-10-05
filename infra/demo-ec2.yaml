@@ -1,0 +1,394 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "Machine Learning Engineering on AWS - Hands-on Demo EC2 (Session Manager, SageMaker, Auto-Stop)"
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t3.large
+    AllowedValues: [t3.medium, t3.large, t3.xlarge, m5.large, m5.xlarge]
+    Description: EC2 インスタンスタイプ（ローカルで scikit-learn / XGBoost を扱うため t3.large 以上を推奨）
+
+  AssetsBucket:
+    Type: String
+    Description: ハンズオン資材がアップロードされた S3 バケット名
+
+  AssetsPrefix:
+    Type: String
+    Default: handson-assets
+    Description: S3 バケット内のプレフィックス
+
+Resources:
+  # ==========================================================================
+  # VPC
+  # ==========================================================================
+  DemoVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: MLEngineeringHandsonVPC
+
+  DemoSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref DemoVPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: MLEngineeringHandsonSubnet
+
+  DemoIGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: MLEngineeringHandsonIGW
+
+  DemoIGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref DemoVPC
+      InternetGatewayId: !Ref DemoIGW
+
+  DemoRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref DemoVPC
+      Tags:
+        - Key: Name
+          Value: MLEngineeringHandsonRT
+
+  DemoRoute:
+    Type: AWS::EC2::Route
+    DependsOn: DemoIGWAttachment
+    Properties:
+      RouteTableId: !Ref DemoRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref DemoIGW
+
+  DemoSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DemoSubnet
+      RouteTableId: !Ref DemoRouteTable
+
+  # ==========================================================================
+  # Security Group (Session Manager 経由のためインバウンド不要)
+  # ==========================================================================
+  DemoSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ML Engineering Handson Demo - Session Manager only
+      VpcId: !Ref DemoVPC
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound (SSM, SageMaker API, S3, etc.)
+      Tags:
+        - Key: Name
+          Value: MLEngineeringHandsonSG
+
+  # ==========================================================================
+  # SageMaker 実行ロール (SageMaker ジョブ・エンドポイントが引き受ける)
+  # ==========================================================================
+  SageMakerExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: MLEngineeringHandsonSageMakerRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sagemaker.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      Tags:
+        - Key: Project
+          Value: MachineLearningEngineeringOnAWS
+
+  # ==========================================================================
+  # IAM Role (Session Manager + SageMaker + S3 + CloudWatch)
+  # ==========================================================================
+  DemoInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: MLEngineeringHandsonEC2Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonSageMakerFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+        - arn:aws:iam::aws:policy/CloudWatchFullAccessV2
+        - arn:aws:iam::aws:policy/AWSCloudFormationFullAccess
+        - arn:aws:iam::aws:policy/AmazonSNSFullAccess
+      Policies:
+        - PolicyName: PassSageMakerRole
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: iam:PassRole
+                Resource: !GetAtt SageMakerExecutionRole.Arn
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: sagemaker.amazonaws.com
+              - Effect: Allow
+                Action:
+                  - iam:GetRole
+                  - iam:ListRoles
+                Resource: '*'
+        - PolicyName: CloudWatchLogsAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DeleteLogGroup
+                  - logs:DeleteLogStream
+                  - logs:DescribeLogGroups
+                Resource: '*'
+
+  DemoInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref DemoInstanceRole
+
+  # ==========================================================================
+  # EC2 Instance
+  # ==========================================================================
+  DemoInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      IamInstanceProfile: !Ref DemoInstanceProfile
+      SubnetId: !Ref DemoSubnet
+      SecurityGroupIds:
+        - !Ref DemoSecurityGroup
+      ImageId: !FindInMap [RegionAMI, !Ref 'AWS::Region', AMI]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 50
+            VolumeType: gp3
+      Tags:
+        - Key: Name
+          Value: MLEngineeringHandsonInstance
+        - Key: Project
+          Value: MachineLearningEngineeringOnAWS
+        - Key: AutoStop
+          Value: "true"
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -x
+          exec > /var/log/user-data.log 2>&1
+
+          echo "=========================================="
+          echo " ML Engineering ハンズオンデモ環境セットアップ開始"
+          echo " $(date '+%Y-%m-%d %H:%M:%S')"
+          echo "=========================================="
+
+          # システム更新と基本ツール (Amazon Linux 2023 = dnf ベース)
+          echo "[1/5] システム更新..."
+          dnf update -y
+          dnf install -y python3.12 python3.12-pip jq unzip tar git
+          # matplotlib の日本語ラベル文字化け対策（Noto CJK フォント + fontconfig）
+          dnf install -y fontconfig
+          dnf install -y google-noto-sans-cjk-ttc-fonts || dnf install -y google-noto-sans-cjk-fonts || true
+          fc-cache -f || true
+
+          # ssm-user を事前に作成する。
+          # Session Manager は初回接続時に ssm-user を作成するが、UserData 実行時点では
+          # 未作成のため、資材の chown が効かない。ここで先に作成しておく。
+          id ssm-user >/dev/null 2>&1 || useradd -m ssm-user
+
+          # Python venv 作成
+          echo "[2/5] Python venv セットアップ..."
+          VENV_DIR=/home/ssm-user/.venv
+          python3.12 -m venv $VENV_DIR
+          source $VENV_DIR/bin/activate
+          pip install --upgrade pip
+          pip install boto3 sagemaker
+          pip install numpy pandas scikit-learn matplotlib seaborn
+          pip install xgboost pyarrow
+
+          # ssm-user のログイン時に自動 activate
+          echo "source $VENV_DIR/bin/activate" >> /home/ssm-user/.bashrc
+          echo "source $VENV_DIR/bin/activate" >> /home/ssm-user/.bash_profile
+          echo 'cd ~/handson 2>/dev/null' >> /home/ssm-user/.bashrc
+          echo 'cd ~/handson 2>/dev/null' >> /home/ssm-user/.bash_profile
+
+          # SageMaker 実行ロール ARN を環境変数として設定
+          echo 'export SAGEMAKER_ROLE_ARN=${SageMakerExecutionRole.Arn}' >> /home/ssm-user/.bashrc
+          echo 'export SAGEMAKER_ROLE_ARN=${SageMakerExecutionRole.Arn}' >> /home/ssm-user/.bash_profile
+
+          # python コマンドでどこからでも実行できるようにラッパー作成
+          cat > /usr/local/bin/python << 'WRAPPER'
+          #!/bin/bash
+          source /home/ssm-user/.venv/bin/activate
+          exec python "$@"
+          WRAPPER
+          chmod +x /usr/local/bin/python
+          ln -sf $VENV_DIR/bin/pip /usr/local/bin/pip
+
+          # S3 からハンズオン資材をダウンロード
+          echo "[3/5] S3 から資材ダウンロード..."
+          WORK_DIR=/home/ssm-user/handson
+          mkdir -p /home/ssm-user
+          mkdir -p $WORK_DIR
+          aws s3 cp s3://${AssetsBucket}/${AssetsPrefix}/handson.tar.gz /tmp/handson.tar.gz
+          tar -xzf /tmp/handson.tar.gz -C $WORK_DIR --strip-components=1
+          rm -f /tmp/handson.tar.gz
+          mkdir -p /home/ssm-user/.cache/pip
+          # ssm-user は上で作成済みなので chown が確実に効く
+          chown -R ssm-user:ssm-user /home/ssm-user
+          find /home/ssm-user/handson -type d -exec chmod u+rwx {} +
+
+          # リージョン設定
+          echo "[4/5] 環境設定..."
+          TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+          AWS_REGION=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region)
+          if [ -z "$AWS_REGION" ]; then AWS_REGION=us-east-1; fi
+          sudo -u ssm-user aws configure set region $AWS_REGION
+
+          # SageMaker デフォルトバケットの事前作成確認
+          echo "[5/5] SageMaker 環境確認..."
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "unknown")
+          echo "  Account: $ACCOUNT_ID / Region: $AWS_REGION"
+          echo "  SageMaker Role: ${SageMakerExecutionRole.Arn}"
+
+          echo ""
+          echo "=========================================="
+          echo " セットアップ完了! $(date '+%Y-%m-%d %H:%M:%S')"
+          echo " 接続後は自動で venv が有効化されます"
+          echo " SAGEMAKER_ROLE_ARN 環境変数が利用できます"
+          echo "=========================================="
+
+  # ==========================================================================
+  # Auto Stop (EventBridge + Lambda: 毎日 23:00 JST に自動停止)
+  # ==========================================================================
+  StopInstanceFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: StopMLEngineeringHandsonInstance
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 30
+      Role: !GetAtt StopInstanceRole.Arn
+      Environment:
+        Variables:
+          INSTANCE_ID: !Ref DemoInstance
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+          def handler(event, context):
+              ec2 = boto3.client('ec2')
+              instance_id = os.environ['INSTANCE_ID']
+              ec2.stop_instances(InstanceIds=[instance_id])
+              print(f"Stopped instance: {instance_id}")
+              return {"status": "stopped"}
+
+  StopInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StopEC2
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ec2:StopInstances
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  StopScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: "Auto-stop demo instance daily at 23:00 JST (14:00 UTC)"
+      ScheduleExpression: cron(0 14 * * ? *)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt StopInstanceFunction.Arn
+          Id: StopMLEngineeringInstance
+
+  StopSchedulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StopInstanceFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt StopScheduleRule.Arn
+
+# ==========================================================================
+# Mappings (Amazon Linux 2023 x86_64)
+# ==========================================================================
+Mappings:
+  RegionAMI:
+    us-east-1:
+      AMI: ami-0bdc7d025135d7b49
+    us-west-2:
+      AMI: ami-0735c191cf914754d
+    ap-northeast-1:
+      AMI: ami-0d52744d6551d851e
+
+# ==========================================================================
+# Outputs
+# ==========================================================================
+Outputs:
+  InstanceId:
+    Value: !Ref DemoInstance
+    Description: "EC2 Instance ID"
+
+  SageMakerRoleArn:
+    Value: !GetAtt SageMakerExecutionRole.Arn
+    Description: "SageMaker 実行ロール ARN（スクリプトで使用）"
+
+  SessionManagerConnect:
+    Value: !Sub "aws ssm start-session --target ${DemoInstance} --region ${AWS::Region}"
+    Description: "Session Manager connect command"
+
+  ConsoleURL:
+    Value: !Sub "https://${AWS::Region}.console.aws.amazon.com/systems-manager/session-manager/${DemoInstance}"
+    Description: "Session Manager console URL"
+
+  StartCommand:
+    Value: !Sub "aws ec2 start-instances --instance-ids ${DemoInstance} --region ${AWS::Region}"
+    Description: "Start instance command"
+
+  StopCommand:
+    Value: !Sub "aws ec2 stop-instances --instance-ids ${DemoInstance} --region ${AWS::Region}"
+    Description: "Stop instance command"
+
+  VpcId:
+    Value: !Ref DemoVPC
+    Description: "VPC ID"
