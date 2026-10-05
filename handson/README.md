@@ -33,7 +33,7 @@ Mod00/01/02/12 は座学中心のため、ハンズオン素材はありませ�
 
 ### Python パッケージ
 - `boto3`
-- `sagemaker`（SageMaker Python SDK）
+- `sagemaker>=2.200,<3`（SageMaker Python SDK **v2 系**。本ハンズオンは v2 API 前提のため、v3 では動作しません）
 - `numpy` / `pandas` / `scikit-learn`
 - `matplotlib` / `seaborn`
 - `xgboost` / `pyarrow`

@@ -225,7 +225,9 @@ Resources:
           python3.12 -m venv $VENV_DIR
           source $VENV_DIR/bin/activate
           pip install --upgrade pip
-          pip install boto3 sagemaker
+          # SageMaker Python SDK は v2 系に固定（ハンズオンは v2 API 前提）。
+          # v3 は API が再編されており、本教材のスクリプトとは非互換。
+          pip install boto3 "sagemaker>=2.200,<3"
           pip install numpy pandas scikit-learn matplotlib seaborn
           pip install xgboost pyarrow
 
@@ -234,6 +236,10 @@ Resources:
           echo "source $VENV_DIR/bin/activate" >> /home/ssm-user/.bash_profile
           echo 'cd ~/handson 2>/dev/null' >> /home/ssm-user/.bashrc
           echo 'cd ~/handson 2>/dev/null' >> /home/ssm-user/.bash_profile
+
+          # SageMaker SDK v2 の非推奨警告を抑止
+          echo 'export SAGEMAKER_SUPPRESS_V2_WARNING=1' >> /home/ssm-user/.bashrc
+          echo 'export SAGEMAKER_SUPPRESS_V2_WARNING=1' >> /home/ssm-user/.bash_profile
 
           # SageMaker 実行ロール ARN を環境変数として設定
           echo 'export SAGEMAKER_ROLE_ARN=${SageMakerExecutionRole.Arn}' >> /home/ssm-user/.bashrc
