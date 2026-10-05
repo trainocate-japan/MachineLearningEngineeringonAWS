@@ -42,9 +42,21 @@ AUC_THRESHOLD = 0.80
 
 
 def get_role() -> str:
+    # 1) 環境変数が最優先
     role = os.environ.get("SAGEMAKER_ROLE_ARN")
     if role:
         return role
+    # 2) IAM から SageMaker 実行ロールを名前で解決する。
+    #    EC2 上で sagemaker.get_execution_role() を使うと EC2 インスタンスロールを
+    #    返してしまい、sagemaker.amazonaws.com が assume できず失敗する。
+    try:
+        import boto3
+
+        iam = boto3.client("iam")
+        return iam.get_role(RoleName="MLEngineeringHandsonSageMakerRole")["Role"]["Arn"]
+    except Exception:
+        pass
+    # 3) 最後の手段
     import sagemaker
 
     return sagemaker.get_execution_role()
